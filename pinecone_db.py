@@ -101,6 +101,12 @@ class PineconeDB:
         texts = [r.chunk_text for r in records]
         embeddings = embedder(texts)
 
+        if len(embeddings) != len(records):
+            raise ValueError(
+                f"Embedding count mismatch: embedder returned {len(embeddings)} vector(s) "
+                f"for {len(records)} record(s). Aborting batch to prevent silent data loss."
+            )
+
         vectors = []
         for record, values in zip(records, embeddings):
             if len(values) != self.dimension:

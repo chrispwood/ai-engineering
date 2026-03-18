@@ -49,9 +49,6 @@ def main():
     parser.add_argument("--load", action="store_true", help="Load and index files from the PDF directory.")
     args = parser.parse_args()
 
-    # The issue description uses PDF_DIRECTORY (uppercase) in the recommended main.py
-    # but my previous implementation used pdf_directory (lowercase).
-    # I'll support both, defaulting to 'attachments'.
     pdf_directory = os.getenv("PDF_DIRECTORY") or "attachments"
     pinecone_api_key = os.getenv("PINECONE_API_KEY")
 
