@@ -46,34 +46,11 @@ class PineconeDB:
         else:
             print(f"Using existing Pinecone index: {self.index_name}.")
 
-    def _record_to_vector(self, record, embedder: Callable[[str], list[float]]) -> dict:
-        """
-        Convert a chunk record into a Pinecone vector payload.
-        """
-        values = embedder(record.chunk_text)
-
-        if len(values) != self.dimension:
-            raise ValueError(
-                f"Embedding dimension mismatch: expected {self.dimension}, got {len(values)} "
-                f"for record {record.id!r}."
-            )
-
-        return {
-            "id": record.id,
-            "values": values,
-            "metadata": {
-                "document_id": record.document_id,
-                "file_name": record.file_name,
-                "subject": record.subject,
-                "chunk_index": record.chunk_index,
-                "chunk_text": record.chunk_text,
-            },
-        }
 
     def index_records(
         self,
         records: Iterable,
-        embedder: Callable[[str], list[float]],
+        embedder: Callable[[list[str]], list[list[float]]],
         batch_size: int = 50,
         skip_if_exists: bool = False,
     ) -> int:
@@ -81,11 +58,11 @@ class PineconeDB:
         Embed and write chunk records to Pinecone in batches.
 
         :param records: An iterable of records to index.
-        :param embedder: A function that takes a string and returns a vector.
+        :param embedder: A function that takes a list of strings and returns a list of vectors.
         :param batch_size: Number of vectors to upsert in one batch.
         :param skip_if_exists: If True, skips documents that already have at least one chunk indexed.
         """
-        batch = []
+        records_to_process = []
         total_indexed = 0
         skipped_documents = set()
 
@@ -105,20 +82,54 @@ class PineconeDB:
                     skipped_documents.add(record.document_id)
                     continue
 
-            batch.append(self._record_to_vector(record, embedder))
+            records_to_process.append(record)
 
-            if len(batch) >= batch_size:
-                self.index.upsert(vectors=batch)
-                total_indexed += len(batch)
-                print(f"Indexed {total_indexed} records...")
-                batch = []
+            if len(records_to_process) >= batch_size:
+                total_indexed += self._upsert_batch(records_to_process, embedder)
+                records_to_process = []
 
-        if batch:
-            self.index.upsert(vectors=batch)
-            total_indexed += len(batch)
+        if records_to_process:
+            total_indexed += self._upsert_batch(records_to_process, embedder)
 
         print(f"Finished indexing {total_indexed} records.")
         return total_indexed
+
+    def _upsert_batch(self, records, embedder: Callable[[list[str]], list[list[float]]]) -> int:
+        """
+        Helper method to embed and upsert a batch of records.
+        """
+        texts = [r.chunk_text for r in records]
+        embeddings = embedder(texts)
+
+        if len(embeddings) != len(records):
+            raise ValueError(
+                f"Embedding count mismatch: embedder returned {len(embeddings)} vector(s) "
+                f"for {len(records)} record(s). Aborting batch to prevent silent data loss."
+            )
+
+        vectors = []
+        for record, values in zip(records, embeddings):
+            if len(values) != self.dimension:
+                raise ValueError(
+                    f"Embedding dimension mismatch: expected {self.dimension}, got {len(values)} "
+                    f"for record {record.id!r}."
+                )
+
+            vectors.append({
+                "id": record.id,
+                "values": values,
+                "metadata": {
+                    "document_id": record.document_id,
+                    "file_name": record.file_name,
+                    "subject": record.subject,
+                    "chunk_index": record.chunk_index,
+                    "chunk_text": record.chunk_text,
+                },
+            })
+
+        self.index.upsert(vectors=vectors)
+        print(f"Indexed {len(vectors)} records...")
+        return len(vectors)
 
     def query_by_vector(
         self,

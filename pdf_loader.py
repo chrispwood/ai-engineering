@@ -1,27 +1,50 @@
 import os
-from typing import Generator, List, Dict
-from pypdf import PdfReader
+from typing import Generator, Iterator
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from dataclasses import dataclass
+
+
+@dataclass
+class ChunkRecord:
+    id: str
+    document_id: str
+    file_name: str
+    subject: str
+    chunk_index: int
+    chunk_text: str
+
 
 class PDFLoader:
     """
-    A class to load PDF documents from a directory and provide chunks using a generator pattern.
+    Loads PDF documents from a directory and yields ChunkRecords using
+    LangChain's PyPDFLoader and RecursiveCharacterTextSplitter.
+
+    PyPDFLoader is preferred over using pypdf directly because it integrates with
+    LangChain's Document format, which carries metadata (page number, source path)
+    alongside each chunk. This makes debugging and citation tracking easier, and
+    keeps the pipeline compatible with other LangChain tools like text splitters
+    and vector store connectors without extra conversion steps.
+
+    This also supports splitting along natural boundaries rather than mid-word.
     """
-    def __init__(self, directory_path: str, chunk_size: int = 1000, chunk_overlap: int = 100):
-        """
-        Initialize the PDFLoader.
 
-        :param directory_path: The directory containing PDF documents.
-        :param chunk_size: The number of characters in each chunk.
-        :param chunk_overlap: The number of overlapping characters between chunks.
-        """
+    def __init__(
+        self,
+        directory_path: str,
+        chunk_size: int = 1000,
+        chunk_overlap: int = 200,
+        subject: str = "general",
+    ):
         self.directory_path = directory_path
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        self.subject = subject
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""],  # semantic-first splitting
+        )
 
-    def _get_pdf_files(self) -> List[str]:
-        """
-        Walk the directory and find all PDF files.
-        """
+    def _get_pdf_files(self) -> list[str]:
         pdf_files = []
         for root, _, files in os.walk(self.directory_path):
             for file in files:
@@ -29,57 +52,76 @@ class PDFLoader:
                     pdf_files.append(os.path.join(root, file))
         return pdf_files
 
-
-    def __iter__(self) -> Generator[Dict[str, str], None, None]:
-        """
-        Allows the PDFLoader to be used as an iterator directly.
-        """
+    def __iter__(self) -> Iterator[ChunkRecord]:
         yield from self.load_chunks()
 
-    def load_chunks(self) -> Generator[Dict[str, str], None, None]:
-        """
-        Generator that yields chunks of text from PDF files in the directory.
-        Yields a dictionary with metadata (source file, chunk index) and text.
-        """
-        pdf_files = self._get_pdf_files()
-        
-        for pdf_path in pdf_files:
+    def load_chunks(self) -> Generator[ChunkRecord, None, None]:
+        for pdf_path in self._get_pdf_files():
             try:
-                reader = PdfReader(pdf_path)
-                buffer = ""
+                file_name = os.path.basename(pdf_path)
+                document_id = os.path.splitext(file_name)[0]
+
+                # LangChain loader — handles text extraction per page
+                print(f"Loading: {file_name}...")
+                loader = PyPDFLoader(pdf_path)
+
                 chunk_index = 0
-                
-                for page in reader.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        buffer += page_text + "\n"
-                    
-                    # Yield chunks as they become available in the buffer
-                    while len(buffer) >= self.chunk_size:
-                        chunk_content = buffer[:self.chunk_size]
-                        yield {
-                            "source": pdf_path,
-                            "chunk_index": chunk_index,
-                            "content": chunk_content
-                        }
+
+                # Sliding window: accumulate up to 2 pages at a time so the splitter
+                # can create chunks that span page boundaries, while never holding
+                # the entire PDF in memory.
+                page_buffer: list[str] = []
+
+                # Text carried forward from the previous window flush.  It is the
+                # last (potentially incomplete) chunk that was held back because it
+                # might be extended by text on the next page.
+                carry_over: str = ""
+
+                for page in loader.lazy_load():
+                    page_buffer.append(page.page_content)
+
+                    # Wait until we have a 2-page window before splitting.
+                    if len(page_buffer) < 2:
+                        continue
+
+                    # Prepend carry_over so the splitter sees text that crosses the
+                    # previous window boundary, enabling true cross-page chunks.
+                    sep = "\n\n" if carry_over else ""
+                    window_text = carry_over + sep + "\n\n".join(page_buffer)
+                    chunks = self.splitter.split_text(window_text)
+
+                    # Yield every chunk except the last: the final chunk may be a
+                    # partial semantic unit that continues on the next page.
+                    for chunk_text in chunks[:-1]:
+                        yield ChunkRecord(
+                            id=f"{document_id}_{chunk_index}",
+                            document_id=document_id,
+                            file_name=file_name,
+                            subject=self.subject,
+                            chunk_index=chunk_index,
+                            chunk_text=chunk_text,
+                        )
                         chunk_index += 1
-                        # Keep the overlap in the buffer for the next chunk
-                        buffer = buffer[self.chunk_size - self.chunk_overlap:]
-                
-                # After all pages, yield any remaining text in the buffer as the final chunk
-                if buffer:
-                    yield {
-                        "source": pdf_path,
-                        "chunk_index": chunk_index,
-                        "content": buffer
-                    }
-                
+
+                    # Hold the last chunk as the bridge into the next window.
+                    carry_over = chunks[-1] if chunks else carry_over
+                    page_buffer.clear()
+
+                # Final flush: combine any buffered pages with the carry_over and
+                # yield all remaining chunks (nothing more to extend them).
+                if page_buffer or carry_over:
+                    sep = "\n\n" if carry_over and page_buffer else ""
+                    tail = carry_over + sep + "\n\n".join(page_buffer)
+                    for chunk_text in self.splitter.split_text(tail):
+                        yield ChunkRecord(
+                            id=f"{document_id}_{chunk_index}",
+                            document_id=document_id,
+                            file_name=file_name,
+                            subject=self.subject,
+                            chunk_index=chunk_index,
+                            chunk_text=chunk_text,
+                        )
+                        chunk_index += 1
+
             except Exception as e:
                 print(f"Error processing {pdf_path}: {e}")
-
-if __name__ == "__main__":
-    # Example usage:
-    loader = PDFLoader("path/to/pdfs")
-    for chunk in loader.load_chunks():
-        print(chunk)
-    pass
