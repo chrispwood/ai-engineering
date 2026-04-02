@@ -5,10 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Setup & Commands
 
 ```bash
-uv sync                   # Install dependencies
-uv run main.py            # Start interactive query REPL
-uv run main.py --load     # Index PDFs from PDF_DIRECTORY into Pinecone
-uv run reproduce_hang.py  # Diagnose which PDF causes loader hangs
+uv sync                    # Install dependencies
+uv run main.py query       # Start interactive query REPL
+uv run main.py load        # Index PDFs from PDF_DIRECTORY into Pinecone
+uv run main.py wipe        # Delete all vectors from the Pinecone index (prompts for confirmation)
 ```
 
 ## Environment
