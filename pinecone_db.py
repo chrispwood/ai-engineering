@@ -131,6 +131,10 @@ class PineconeDB:
         print(f"Indexed {len(vectors)} records...")
         return len(vectors)
 
+    def wipe(self) -> None:
+        """Delete all vectors from the default namespace of the index."""
+        self.index.delete(delete_all=True)
+
     def query_by_vector(
         self,
         vector: list[float],
